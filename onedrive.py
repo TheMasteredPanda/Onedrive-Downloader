@@ -108,16 +108,15 @@ def init_db(params):
         print('\nFormatted %s File(s)/Folder(s)' % len(formatted))
         print("Inserting formatted entries into database.")
 
-        for i in range(math.ceil((len(formatted) / 400))):
+        for i in range(math.ceil((len(formatted) / 40))):
             conn = sqlite3.connect('data.db')
-            batch = formatted[i * 400: (i + 1) * 400]
+            batch = formatted[i * 40: (i + 1) * 40]
+            print('Attempting to insert batch sliced from index %s to %s' % (i * 40, (i + 1) * 40))
 
             cursor = conn.cursor()
-            try:
-                cursor.executemany('INSERT INTO items VALUES (?,?,?,?,?,?,?)', batch)
-                conn.commit()
-            finally:
-                cursor.close()
+            cursor.executemany('INSERT INTO items VALUES (?,?,?,?,?,?,?)', batch)
+            conn.commit()
+            conn.close()
 
         # conn2 = sqlite3.connect('data.db')
         # cur1 = conn2.cursor()
