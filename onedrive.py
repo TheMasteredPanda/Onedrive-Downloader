@@ -19,38 +19,6 @@ file_count = 0
 folder_count = 0
 
 
-# app = msal.PublicClientApplication(clientId, authority=config['authority'])
-# result = None
-# accounts = app.get_accounts()
-#
-# if accounts:
-#     logging.info("Account(s) exists in cache, probably with token too. Let's try.")
-#     print("Pick the account you want to use to proceed:")
-#     for a in accounts:
-#         print(a["username"])
-#     # Assuming the end user chose this one
-#     chosen = accounts[0]
-#     # Now let's try to find a token in cache for this account
-#     result = app.acquire_token_silent(config["scope"], account=chosen)
-#
-# if not result:
-#     logging.info("No suitable token exists in cache. Let's get a new one from AAD.")
-#
-#     flow = app.initiate_device_flow(scopes=config["scope"])
-#     if "user_code" not in flow:
-#         raise ValueError(
-#             "Fail to create device flow. Err: %s" % json.dumps(flow, indent=4))
-#
-#     print(flow["message"])
-#     sys.stdout.flush()  # Some terminal needs this to ensure the message is shown
-#
-#     # Ideally you should wait here, in order to save some unnecessary polling
-#     # input("Press Enter after signing in from another device to proceed, CTRL+C to abort.")
-#
-#     result = app.acquire_token_by_device_flow(flow)  # By default it will block
-
-
-
 def init_db(params):
     if os.path.exists("data.db"):
         return
@@ -58,7 +26,6 @@ def init_db(params):
         print('Creating data.db')
         connection = sqlite3.connect('data.db')
         c = connection.cursor()
-
         c.execute('''CREATE TABLE items(
         id TEXT PRIMARY KEY, 
         type INTEGER NOT NULL, 
@@ -107,29 +74,37 @@ def init_db(params):
         walk_files(None)
         print('\nFormatted %s File(s)/Folder(s)' % len(formatted))
         print("Inserting formatted entries into database.")
-
-        for i in range(math.ceil((len(formatted) / 40))):
+        object_array_amount = math.ceil((len(formatted) / 100))
+        for i in range(object_array_amount):
             conn = sqlite3.connect('data.db')
-            batch = formatted[i * 40: (i + 1) * 40]
-            print('Attempting to insert batch sliced from index %s to %s' % (i * 40, (i + 1) * 40))
+            if i == object_array_amount:
+                batch = formatted[i * 100: -1]
+            else:
+                batch = formatted[i * 100: (i + 1) * 100]
+                print(batch)
+            print('Attempting to insert batch sliced from index %s to %s' % (i * 100, (i + 1) * 100))
 
-            cursor = conn.cursor()
-            cursor.executemany('INSERT INTO items VALUES (?,?,?,?,?,?,?)', batch)
+            # cursor = conn.cursor()
+            conn.executemany('INSERT INTO items VALUES (?,?,?,?,?,?,?)', batch)
             conn.commit()
             conn.close()
 
-        # conn2 = sqlite3.connect('data.db')
-        # cur1 = conn2.cursor()
-        # cur1.executemany("INSERT INTO items VALUES (?,?,?,?,?,?,?);", formatted)
-        # conn2.commit()
-        # conn2.close()
-        # conn3 = sqlite3.connect('data.db')
-        # cur = conn3.cursor()
-        # cur.executemany("INSERT INTO urls VALUES (?,?)", urls)
-        # conn3.commit()
-        # conn3.close()
+        urls_array_amount = math.ceil((len(urls) / 100))
 
-        # print("Inserted %s urls and %s formatted items" % (len(urls), len(formatted)))
+        for i in range(urls_array_amount):
+            conn = sqlite3.connect('data.db')
+
+            if i == urls_array_amount:
+                batch = urls[i * 100: -1]
+            else:
+                batch = urls[i * 100: (i + 1) * 100]
+
+            print('Attempting to insert url batch sliced from index %s to %s' % (i * 100, (i + 1) * 100))
+            conn.executemany('INSERT INTO urls VALUES (?,?)', batch)
+            conn.commit()
+            conn.close()
+
+        print("Created database and populated tables.")
 
 
 def get_token(refresh):
@@ -221,46 +196,6 @@ def get_files(params, directory_id):
     return json.loads(response.text)['value']
 
 
-# def aggregate(params, parent_directory, directory):
-#     files = get_files(params, directory)
-#
-#     for file in files:
-#         if 'folder' in file:
-#             print("%s/%s is a directory" % (parent_directory, file['name']))
-#             # aggregate(params, file['name'])
-#         else:
-#             print("%s/%s is not a directory" % (parent_directory, file['name']))
-#
-# # if "access_token" in result
-#
-# token = "EwB4A8l6BAAUO9chh8cJscQLmU+LSWpbnr0vmwwAAf++mPExp7K41PuQUBBer8CfodzR5mQIi6b/hW4f+1DUvJCJNgPiM751acWk+j67wn3ZOpQftbhzA9Tio4wx4YFib02FHNSRkVmK5Gdc67N8EvotEA71nd7k3rS9zqg4AsZ9Lz0cm9GSEI4gpb3LYl0dqrOHY9uJgOtpnG3jxN40qyh24xJGzfmR2THcTHx6NvaGJT0ligFxJRj/fLdSf2QCmvf47NjytEEDREZPTuQueMq/DhX5RPYUsa8LKHYEYNJ/7jRaC5mn6vHkGbARw+CcNItGCAPLLDMmRV+aTI6Fp3TIGhAQkutX/AJq/BuzNJWMdD6ct+D7cBAp9f5VHzIDZgAACJk1AJ5Ytk8QSAKSyfdX77nmwdKcT2sBkxuacB1IugaeQlY/bChY9DZ+H3HO5brsH6pawLE3GtiV9yWpfyfISjW5ioREtnRAnkxr9+961ZthmMQzSdpXL58oFXPETYMsp22x+5i2rDycyEHXZnQXECTMEBlgLEZy2D34sVSjPplFOTD5bwcdJwDBvydNDM6jNoVqKlG1VY23udEwSHSCtm1d3nD2x6FETZI4sOX5kfmqR/bUm133C/n2zFTbf5Di1kddRg2CSswcgFSfD/EMWKsuTAn5xGdbxa3ZpGJa49Bjm9DwDJqhIGrk8UbgTNjXmcoesvk5GkOVtWctKWSrcgMKN+WCUnK42EjNGZvMsSCr1RD5o6bP/Wcur0BYiIujF1gaSRGwY5wLzq/KeMWEOlUHhUNLvKah5M44gviPHcli7P0Rji1fHhxrrLo5rE/Ds+2e6j7LJx6iqCTasKy5GDGq7ooCKngkbUR0/KG0yqEr+vggGMRyvumF42kIGYqDLzU49YsZbdtycmvZ90YGIUJMt7rhcjeMsj4yMD5ir2HsbSj6Cnt4lP1CPUPP/etIOSQqkOt9740R62XbYMzwQsXobyuFx58Pqewf0erNWV/5nzyiHa5feECFFinEgKtmknhwVNyYSDgUtF+8ZasocO5NBAVirj0wAM1NIN8sL/hjU55ocT7cHL8wlirVmbxhn1+FHyEOFcr50dEQoQzv3qWcgjIrYkz8qNaqn0i6dAibQeA2ai2CEw/wzN7cv4lvnuJOtlvhjEMbsd+x86UdIW9PSYkC"
-# params = {"Authorization": "Bearer " + token}
-# files = get_files(params, None)
-#
-# for file in files:
-#     if 'folder' in file:
-#         print("%s is a directory" % file['name'])
-#         aggregate(params, file['name'], file['id'])
-#     else:
-#         print("%s is not a directory" % file['name'])
-
-# class DownloadWorker(threading.Thread):
-#     def __init__(self, queue):
-#         threading.Thread.__init__(self)
-#         self.queue = queue
-#
-#     def run(self):
-#         while True:
-#             try:
-#
-#             finally:
-
-# def create_folders():
-#     folders: {
-#
-#     }
-#
-#     for
 
 
 token_info = get_token(False)
