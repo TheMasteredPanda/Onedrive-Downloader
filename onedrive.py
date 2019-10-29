@@ -9,7 +9,6 @@ import queue
 import threading
 import math
 from anytree import Node, RenderTree, AnyNode, PostOrderIter
-from anytree.dotexport import RenderTreeGraph
 
 config = {
     "authority": "https://login.microsoftonline.com/common",
@@ -253,6 +252,10 @@ def worker():
 
         file = requests.get(task['url'])
 
+        if file.status_code != 200:
+            print(file.text)
+            sys.exit(1)
+
         try:
             print('Downloading %s', task['name'])
             open(full_path, 'wb').write(file.content)
@@ -274,6 +277,7 @@ root_node = build_directory_paths()
 conn2 = sqlite3.connect('data.db')
 q = queue.Queue(maxsize=0)
 threads = []
+requested = False
 
 for i in range(2):
     t = threading.Thread(target=worker)
