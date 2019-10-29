@@ -8,6 +8,8 @@ import os
 import queue
 import threading
 import math
+from anytree import Node, RenderTree, AnyNode, PostOrderIter
+from anytree.dotexport import RenderTreeGraph
 
 config = {
     "authority": "https://login.microsoftonline.com/common",
@@ -25,8 +27,7 @@ def init_db(params):
     else:
         print('Creating data.db')
         connection = sqlite3.connect('data.db')
-        c = connection.cursor()
-        c.execute('''CREATE TABLE items(
+        connection.execute('''CREATE TABLE items(
         id TEXT PRIMARY KEY, 
         type INTEGER NOT NULL, 
         name TEXT NOT NULL, 
@@ -35,7 +36,7 @@ def init_db(params):
         downloaded_data DATETIME NULL,
         parent_directory TEXT NULL DEFAULT NULL);''')
         print('Created items table.')
-        c.execute('''CREATE TABLE urls(
+        connection.execute('''CREATE TABLE urls(
         id TEXT PRIMARY KEY,
         url TEXT NOT NULL)''')
         connection.close()
@@ -75,35 +76,32 @@ def init_db(params):
         print('\nFormatted %s File(s)/Folder(s)' % len(formatted))
         print("Inserting formatted entries into database.")
         object_array_amount = math.ceil((len(formatted) / 100))
+        conn = sqlite3.connect('data.db')
         for i in range(object_array_amount):
-            conn = sqlite3.connect('data.db')
+
             if i == object_array_amount:
                 batch = formatted[i * 100: -1]
             else:
                 batch = formatted[i * 100: (i + 1) * 100]
-                print(batch)
             print('Attempting to insert batch sliced from index %s to %s' % (i * 100, (i + 1) * 100))
 
             # cursor = conn.cursor()
             conn.executemany('INSERT INTO items VALUES (?,?,?,?,?,?,?)', batch)
             conn.commit()
-            conn.close()
 
         urls_array_amount = math.ceil((len(urls) / 100))
 
         for i in range(urls_array_amount):
-            conn = sqlite3.connect('data.db')
-
             if i == urls_array_amount:
                 batch = urls[i * 100: -1]
             else:
                 batch = urls[i * 100: (i + 1) * 100]
 
+            print(batch)
             print('Attempting to insert url batch sliced from index %s to %s' % (i * 100, (i + 1) * 100))
             conn.executemany('INSERT INTO urls VALUES (?,?)', batch)
             conn.commit()
-            conn.close()
-
+        conn.close()
         print("Created database and populated tables.")
 
 
@@ -196,13 +194,134 @@ def get_files(params, directory_id):
     return json.loads(response.text)['value']
 
 
+def build_directory_paths():
+    conn = sqlite3.connect('data.db')
+    root = Node('onedrive', entry_id=None)
+    nodes = {}
+    unformatted_paths = {}
+
+    for row in conn.execute("SELECT * FROM items WHERE type=2"):
+        unformatted_paths[row[0]] = {
+            "parent": row[6],
+            "name": row[2],
+            "id": row[0],
+            "unformatted": True
+        }
+
+    for key in unformatted_paths:
+        entry = unformatted_paths[key]
+        nodes[key] = Node(entry['name'], parent=None, parent_id=entry['parent'], entry_id=entry['id'])
+
+    for node_key in nodes:
+        node = nodes[node_key]
+
+        if node.parent_id is None:
+            node.parent = root
+        else:
+            node.parent = nodes[node.parent_id]
+
+    def make(root, path):
+        if len(root.children) == 0:
+            return
+
+        for child in root.children:
+            if os.path.exists('%s/%s' % (path, child.name)):
+                continue
+
+            os.makedirs("%s/%s" % (path, child.name))
+            make(child, "%s/%s" % (path, child.name))
+
+    make(root, "onedrive")
+    conn.close()
+    print("Directories made.")
+    return root
+
+def worker():
+    while True:
+        task = q.get()
+
+        if task is None:
+            break
+
+        full_path = "%s/%s" % (task['path'], task['name'])
+
+        if os.path.exists(full_path):
+            if os.path.getsize(full_path) >= task['size']:
+                continue
+            else:
+                os.os.remove(full_path)
+
+        file = requests.get(task['url'])
+
+        try:
+            print('Downloading %s', task['name'])
+            open(full_path, 'wb').write(file.content)
+        finally:
+            print("Downloaded file %s" % task['name'])
+            conn = sqlite3.connect('data.db')
+            conn.execute("UPDATE items SET downloaded = TRUE WHERE id = ?", (task['id'],))
+            conn.commit()
+            q.task_done()
 
 
 token_info = get_token(False)
-# print(json.dumps(token_info, indent=4))
+# print(json.dumps(token_info,
+# indent=4))
 params = {"Authorization": "%s %s" % (token_info['type'], token_info['token'])}
 print(json.dumps(params, indent=4))
 init_db(params)
+root_node = build_directory_paths()
+conn2 = sqlite3.connect('data.db')
+q = queue.Queue(maxsize=0)
+threads = []
+
+for i in range(2):
+    t = threading.Thread(target=worker)
+    t.start()
+    threads.append(t)
+    print("Created Worker %s" % i)
+
+for item_row in conn2.execute("SELECT * FROM items WHERE downloaded = false AND type = 1"):
+    cursor = conn2.cursor()
+    cursor.execute("SELECT * FROM urls WHERE id = ?", (item_row[0],))
+    result = cursor.fetchone()
+    if result is None:
+        continue
+    else:
+        # print([node.path for node in PostOrderIter(root_node, filter_=lambda e: e.entry_id == item_row[6])][0])
+        path = [node for node in PostOrderIter(root_node, filter_=lambda e: e.entry_id == item_row[6])][0]
+        # path = 'onedrive'
+        string_path = ''
+
+        for entry in path.path:
+            if entry.depth <= path.depth:
+                if entry.depth == 0:
+                    string_path = entry.name
+                else:
+                    string_path = string_path + '/' + entry.name
+                continue
+
+            break
+
+        url = result[1]
+        id = result[0]
+        size = item_row[3]
+        name = item_row[2]
+
+        q.put({
+            'path': string_path,
+            'url': url,
+            'id': id,
+            'size': size,
+            'name': name
+        })
+
+
+print("Tasks Queued: %s" % (q.qsize()))
+
+q.join()
+
+
 
 
 
