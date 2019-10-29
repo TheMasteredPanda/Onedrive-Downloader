@@ -250,15 +250,14 @@ def worker():
             else:
                 os.os.remove(full_path)
 
-        file = requests.get(task['url'])
-
-        if file.status_code != 200:
-            print(file.text)
-            sys.exit(1)
-
         try:
-            print('Downloading %s', task['name'])
-            open(full_path, 'wb').write(file.content)
+            with requests.get(url, stream=True) as r:
+                r.raise_for_status()
+                with open(full_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:  # filter out keep-alive new chunks
+                            f.write(chunk)
+                            # f.flush()
         finally:
             print("Downloaded file %s" % task['name'])
             conn = sqlite3.connect('data.db')
