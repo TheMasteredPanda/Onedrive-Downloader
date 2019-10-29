@@ -259,14 +259,33 @@ def worker():
                             f.write(chunk)
                             # f.flush()
         finally:
-            print("Downloaded file %s" % task['name'])
-            conn = sqlite3.connect('data.db')
-            conn.execute("UPDATE items SET downloaded = TRUE WHERE id = ?", (task['id'],))
-            conn.commit()
-            q.task_done()
+            print("Downloaded file %s - %s Files Downloaded" % (task['name'], q.qsize()))
+            sql_1.put(task['id'])
 
 
-token_info = get_token(False)
+def sql_worker():
+    while True:
+        time.sleep(10)
+        ids = []
+
+        for id in iter(sql_1.get, None):
+            if id is None:
+                continue
+            ids.append(ids)
+
+        connection = sqlite3.connect('data.db')
+        connection.executemany('UPDATE items SET downloaded = TRUE WHERE id=?', tuple(ids))
+        connection.commit()
+        connection.close()
+        print('Executed batch of %s updates.' % len(ids))
+
+
+if os.path.exists('token.json'):
+    token_info = json.loads(open('token.json', 'r').read())
+else:
+    token_info = get_token(False)
+    open('token.json', 'wb').write(json.dumps(token_info))
+
 # print(json.dumps(token_info,
 # indent=4))
 params = {"Authorization": "%s %s" % (token_info['type'], token_info['token'])}
@@ -275,6 +294,7 @@ init_db(params)
 root_node = build_directory_paths()
 conn2 = sqlite3.connect('data.db')
 q = queue.Queue(maxsize=0)
+sql_1 = queue.Queue(maxsize=0)
 threads = []
 requested = False
 
@@ -283,6 +303,10 @@ for i in range(2):
     t.start()
     threads.append(t)
     print("Created Worker %s" % i)
+
+t_sql = threading.Thread(target=sql_worker)
+t_sql.start()
+threads.append(t_sql)
 
 for item_row in conn2.execute("SELECT * FROM items WHERE downloaded = false AND type = 1"):
     cursor = conn2.cursor()
@@ -323,8 +347,8 @@ for item_row in conn2.execute("SELECT * FROM items WHERE downloaded = false AND 
 print("Tasks Queued: %s" % (q.qsize()))
 
 q.join()
-
-
-
+sql_1.join()
+print('Finished tasks')
+sys.exit(0)
 
 
