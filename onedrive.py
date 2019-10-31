@@ -288,13 +288,17 @@ def worker():
             if os.path.getsize(task['path']) >= task['size']:
                 continue
             else:
-                os.os.remove(task['path'])
+                os.remove(task['path'])
 
         try:
             try:
                 print('Downloading %s' % task['path'])
                 with requests.get(task['url'], stream=True) as r:
                     if r.status_code == 401:
+                        if requested is False:
+                            requested = True
+                            get_new_token()
+                            requested = False
                         break
 
                     r.raise_for_status()
@@ -339,6 +343,16 @@ def sql_worker():
         connection.close()
         print('Executed batch of %s updates.' % len(ids))
 
+def get_new_token():
+    global token_info
+    token_info_1 = get_token(True)
+
+    if os.path.exists('token.json'):
+        os.remove('token.json')
+
+    with open('token.json', 'w') as file:
+        json.dump(token_info_1, file)
+        token_info = token_info_1
 
 if os.path.exists('token.json'):
     with open('token.json') as file:
@@ -350,7 +364,6 @@ else:
 
 
 params = {"Authorization": "%s %s" % (token_info['type'], token_info['token'])}
-print(json.dumps(params, indent=4))
 init_db(params)
 build_directory_paths()
 conn2 = sqlite3.connect('data.db')
