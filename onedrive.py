@@ -8,17 +8,20 @@ import os
 import queue
 import threading
 import math
-from anytree import Node, RenderTree, AnyNode, PostOrderIter
+import logging
+from anytree import Node, RenderTree, AnyNode, PostOrderIter, PreOrderIter
+# logging.basicConfig(filename='app.log', filemode='w', format='%(name)s - %(levelname)s - %(message)s')
+# logger = logging.getLogger(__name__)
+from requests import HTTPError
 
 config = {
     "authority": "https://login.microsoftonline.com/common",
     "scope": ["User.Read", "Files.Read"],
-    "client_id": "<hidden>"
+    "client_id": "10dffd03-493d-48a9-8aa4-ea62bc66b355"
 }
 
-file_count = 0
-folder_count = 0
-
+files_iterated = 0
+files_folders = 0
 
 def init_db(params):
     if os.path.exists("data.db"):
@@ -27,82 +30,141 @@ def init_db(params):
         print('Creating data.db')
         connection = sqlite3.connect('data.db')
         connection.execute('''CREATE TABLE items(
-        id TEXT PRIMARY KEY, 
-        type INTEGER NOT NULL, 
-        name TEXT NOT NULL, 
-        size INTEGER NOT NULL, 
-        downloaded BOOLEAN DEFAULT FALSE, 
-        downloaded_data DATETIME NULL,
-        parent_directory TEXT NULL DEFAULT NULL);''')
-        print('Created items table.')
-        connection.execute('''CREATE TABLE urls(
         id TEXT PRIMARY KEY,
-        url TEXT NOT NULL)''')
+        type INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        downloaded BOOLEAN DEFAULT FALSE,
+        url TEXT DEFAULT NULL,
+        path TEXT NOT NULL,
+        parent_directory_id TEXT NULL DEFAULT NULL);''')
+        print('Created items table.')
         connection.close()
-        formatted = []
-        urls = []
 
-        def walk_files(directory_id):
-            files = None
+        nodes = {}
+        iter_queue = queue.Queue(maxsize=0)
 
-            if not directory_id:
-                files = get_files(params, None)
-            else:
-                files = get_files(params, directory_id)
+        def progress():
+            print("Files Iterated: %s Files That Are Folders: %s Tasks Queued: %s" % (
+                files_iterated, files_folders, iter_queue.qsize()))
+            # sys.stdout.flush()
+
+        def iterate_worker():
+            while True:
+                task = iter_queue.get()
+
+                if task is None:
+                    break
+
+                iterate(task)
+                progress()
+                iter_queue.task_done()
+
+        workers = []
+
+        print('Creating worker threads.')
+
+        for i in range(29):
+            t = threading.Thread(target=iterate_worker)
+            t.start()
+            workers.append(t)
+            print('Created worker thread %s' % i)
+
+        def iterate(data):
+            # global files_folders, files_iterated
+            global files_iterated, files_folders
+            files = data['value']
 
             for file in files:
-                global file_count
-                global folder_count
+                files_iterated = files_iterated + 1
 
-                type = None
-
-                if "folder" in file:
-                    type = 2
-                    folder_count = folder_count + 1
-                    walk_files(file['id'])
+                if 'size' in file:
+                    size = file['size']
                 else:
-                    if "file" not in file:
-                        continue
-                    type = 1
-                    urls.append((file['id'], file['@microsoft.graph.downloadUrl']))
-                    file_count = file_count + 1
+                    size = -1
 
-                sys.stdout.write("\rFiles Formatted: %d Folder Formatted: %d" % (file_count, folder_count))
-                sys.stdout.flush()
-                formatted.append((file['id'], type, file['name'], file['size'], False, None, directory_id))
+                if '@microsoft.graph.downloadUrl' in file:
+                    download_url = file['@microsoft.graph.downloadUrl']
+                else:
+                    download_url = None
 
-        walk_files(None)
-        print('\nFormatted %s File(s)/Folder(s)' % len(formatted))
-        print("Inserting formatted entries into database.")
-        object_array_amount = math.ceil((len(formatted) / 100))
+                if 'folder' in file:
+                    object_type = 2
+                else:
+                    object_type = 1
+
+                nodes[file['id']] = Node(file['name'], parent=None, entry_id=file['id'],
+                                         parent_id=file['parentReference']['id'],
+                                         parent_name=file['parentReference']['path'], size=size,
+                                         download_url=download_url, type=object_type)
+                if 'folder' in file:
+                    files_folders = files_folders + 1
+                    iter_queue.put(get_entry(params, file['id'], None))
+
+            if '@odata.nextLink' in data:
+                iter_queue.put(get_entry(params, None, data['@odata.nextLink']))
+
+        print("Starting iteration of all files and folders in the drive.")
+        iterate(get_entry(params, None, None))
+        iter_queue.join()
+
+        for i in range(29):
+            iter_queue.put(None)
+
+        for t in workers:
+            t.join()
+            print('Terminating worker thread.')
+
+        print("Indexed %s files and folders" % len(nodes))
+        root = Node('onedrive', parent=None, entry_id='1D464A8DD283576C!101')
+
+        for node_key in nodes:
+            node = nodes[node_key]
+
+            if node.parent_id in '1D464A8DD283576C!101':
+                node.parent = root
+
+            else:
+                if node.parent_id not in nodes.keys():
+                    print('Parent ID %s/%s is not in keys' % (node.parent_id, node.parent_name))
+                    continue
+                node.parent = nodes[node.parent_id]
+
+        formatted = []
+
+        for node_key in nodes:
+            node = nodes[node_key]
+            node_string = str(node)
+            node_string = node_string.replace("Node(", "")
+            node_string = node_string.replace(")", "")
+            split = node_string.split(", ")
+            path = split[0].replace("'/", "'")
+            formatted.append((
+                node.entry_id,
+                node.type,
+                node.name,
+                node.size,
+                False,
+                node.download_url,
+                path,
+                node.parent_id
+            ))
+
+        print("Formatted %s nodes" % len(formatted))
+
         conn = sqlite3.connect('data.db')
-        for i in range(object_array_amount):
 
-            if i == object_array_amount:
-                batch = formatted[i * 100: -1]
+        iterations = math.ceil(len(formatted) / 200)
+        for i in range(iterations):
+
+            if i == iterations:
+                sql_batch = formatted[i * 200: -1]
             else:
-                batch = formatted[i * 100: (i + 1) * 100]
-            print('Attempting to insert batch sliced from index %s to %s' % (i * 100, (i + 1) * 100))
+                sql_batch = formatted[i * 200: (i + 1) * 200]
 
-            # cursor = conn.cursor()
-            conn.executemany('INSERT INTO items VALUES (?,?,?,?,?,?,?)', batch)
-            conn.commit()
-
-        urls_array_amount = math.ceil((len(urls) / 100))
-
-        for i in range(urls_array_amount):
-            if i == urls_array_amount:
-                batch = urls[i * 100: -1]
-            else:
-                batch = urls[i * 100: (i + 1) * 100]
-
-            print(batch)
-            print('Attempting to insert url batch sliced from index %s to %s' % (i * 100, (i + 1) * 100))
-            conn.executemany('INSERT INTO urls VALUES (?,?)', batch)
+            conn.executemany("INSERT INTO items VALUES (?,?,?,?,?,?,?,?)", sql_batch)
             conn.commit()
         conn.close()
-        print("Created database and populated tables.")
-
 
 def get_token(refresh):
     if refresh:
@@ -176,12 +238,14 @@ def get_token(refresh):
 def get_current_time_in_miliseconds():
     return int(time.time()*1000)
 
-
-def get_files(params, directory_id):
+def get_entry(params, directory_id, next_link):
     url = 'https://graph.microsoft.com/v1.0/me/drive/root/children'
 
-    if directory_id:
+    if directory_id is not None:
         url = 'https://graph.microsoft.com/v1.0/me/drive/items/' + directory_id + "/children"
+
+    if next_link is not None:
+        url = next_link
 
     response = requests.get(url, headers=params)
 
@@ -189,77 +253,73 @@ def get_files(params, directory_id):
         print(response.url)
         print("%s:\n%s" % (response.status_code, response.text))
 
-    # print(response.url)
-    return json.loads(response.text)['value']
+    json_content = json.loads(response.text)
+    return json_content
 
 
 def build_directory_paths():
     conn = sqlite3.connect('data.db')
     root = Node('onedrive', entry_id=None)
     nodes = {}
-    unformatted_paths = {}
 
     for row in conn.execute("SELECT * FROM items WHERE type=2"):
-        unformatted_paths[row[0]] = {
-            "parent": row[6],
-            "name": row[2],
-            "id": row[0],
-            "unformatted": True
-        }
+        # print(row)
+        path = row[6]
+        path = path[1::]
+        path = path[:-1]
 
-    for key in unformatted_paths:
-        entry = unformatted_paths[key]
-        nodes[key] = Node(entry['name'], parent=None, parent_id=entry['parent'], entry_id=entry['id'])
+        if path.startswith('/'):
+            path = path[1::]
 
-    for node_key in nodes:
-        node = nodes[node_key]
+        if os.path.exists(path):
+            continue
 
-        if node.parent_id is None:
-            node.parent = root
-        else:
-            node.parent = nodes[node.parent_id]
-
-    def make(root, path):
-        if len(root.children) == 0:
-            return
-
-        for child in root.children:
-            if os.path.exists('%s/%s' % (path, child.name)):
-                continue
-
-            os.makedirs("%s/%s" % (path, child.name))
-            make(child, "%s/%s" % (path, child.name))
-
-    make(root, "onedrive")
-    conn.close()
-    print("Directories made.")
-    return root
+        os.makedirs(path)
 
 def worker():
     while True:
         task = q.get()
+        # print(task)
 
         if task is None:
             break
 
-        full_path = "%s/%s" % (task['path'], task['name'])
-
-        if os.path.exists(full_path):
-            if os.path.getsize(full_path) >= task['size']:
+        if os.path.exists(task['path']):
+            if os.path.getsize(task['path']) >= task['size']:
                 continue
             else:
-                os.os.remove(full_path)
+                os.os.remove(task['path'])
 
         try:
-            with requests.get(url, stream=True) as r:
-                r.raise_for_status()
-                with open(full_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        if chunk:  # filter out keep-alive new chunks
-                            f.write(chunk)
-                            # f.flush()
+            try:
+                print('Downloading %s' % task['path'])
+                with requests.get(task['url'], stream=True) as r:
+                    if r.status_code == 401:
+                        break
+
+                    r.raise_for_status()
+                    full_path = task['path']
+
+                    if full_path.startswith('/'):
+                        full_path = full_path[1::]
+                    with open(full_path, 'wb') as f:
+                        splitPath = full_path.split('/')
+                        splitPath.pop()
+                        path = '/'.join(splitPath)
+
+                        if os.path.exists(path) is False:
+                            os.makedirs(path)
+
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:  # filter out keep-alive new chunks
+                                f.write(chunk)
+                                # f.flush()
+            except HTTPError:
+                print('Got http error in attempting to download file named %s' % task['name'])
+                q.task_done()
+                continue
         finally:
-            print("Downloaded file %s - %s Files Downloaded" % (task['name'], q.qsize()))
+            print("Downloaded file %s - %s Files to Download" % (task['name'], q.qsize()))
             sql_1.put(task['id'])
 
 
@@ -271,7 +331,7 @@ def sql_worker():
         for id in iter(sql_1.get, None):
             if id is None:
                 continue
-            ids.append(ids)
+            ids.append(id)
 
         connection = sqlite3.connect('data.db')
         connection.executemany('UPDATE items SET downloaded = TRUE WHERE id=?', tuple(ids))
@@ -281,74 +341,64 @@ def sql_worker():
 
 
 if os.path.exists('token.json'):
-    token_info = json.loads(open('token.json', 'r').read())
+    with open('token.json') as file:
+        token_info = json.load(file)
 else:
     token_info = get_token(False)
-    open('token.json', 'wb').write(json.dumps(token_info))
+    with open('token.json', 'w') as file:
+        json.dump(token_info, file)
 
-# print(json.dumps(token_info,
-# indent=4))
+
 params = {"Authorization": "%s %s" % (token_info['type'], token_info['token'])}
 print(json.dumps(params, indent=4))
 init_db(params)
-root_node = build_directory_paths()
+build_directory_paths()
 conn2 = sqlite3.connect('data.db')
 q = queue.Queue(maxsize=0)
 sql_1 = queue.Queue(maxsize=0)
 threads = []
 requested = False
 
-for i in range(2):
+for i in range(15):
     t = threading.Thread(target=worker)
     t.start()
     threads.append(t)
-    print("Created Worker %s" % i)
+    print("Created Downloader Worker %s" % i)
 
-t_sql = threading.Thread(target=sql_worker)
-t_sql.start()
-threads.append(t_sql)
+sql_t = threading.Thread(target=sql_worker)
+sql_t.start()
+threads.append(sql_t)
+print('Created SQL Worker')
 
-for item_row in conn2.execute("SELECT * FROM items WHERE downloaded = false AND type = 1"):
-    cursor = conn2.cursor()
-    cursor.execute("SELECT * FROM urls WHERE id = ?", (item_row[0],))
-    result = cursor.fetchone()
-    if result is None:
-        continue
-    else:
-        # print([node.path for node in PostOrderIter(root_node, filter_=lambda e: e.entry_id == item_row[6])][0])
-        path = [node for node in PostOrderIter(root_node, filter_=lambda e: e.entry_id == item_row[6])][0]
-        # path = 'onedrive'
-        string_path = ''
+for item_row in conn2.execute("SELECT * FROM items WHERE downloaded = FALSE AND type = 1"):
+    path = item_row[6]
+    path = path[1::]
+    path = path[:-1]
 
-        for entry in path.path:
-            if entry.depth <= path.depth:
-                if entry.depth == 0:
-                    string_path = entry.name
-                else:
-                    string_path = string_path + '/' + entry.name
-                continue
+    q.put({
+        'id': item_row[0],
+        'type': item_row[1],
+        'name': item_row[2],
+        'size': item_row[3],
+        'downloaded': item_row[4],
+        'url': item_row[5],
+        'path': path,
+        'parent': item_row[7]
+    })
 
-            break
-
-        url = result[1]
-        id = result[0]
-        size = item_row[3]
-        name = item_row[2]
-
-        q.put({
-            'path': string_path,
-            'url': url,
-            'id': id,
-            'size': size,
-            'name': name
-        })
-
-
-print("Tasks Queued: %s" % (q.qsize()))
+print("Tasks Queued: %s" % q.qsize())
 
 q.join()
 sql_1.join()
-print('Finished tasks')
-sys.exit(0)
 
+for i in range(15):
+    q.put(None)
+
+sql_1.put(None)
+
+for t in threads:
+    t.join()
+    print('Terminating downloader thread.')
+
+print('Finished tasks')
 
